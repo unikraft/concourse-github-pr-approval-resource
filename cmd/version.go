@@ -49,5 +49,5 @@ func SetVersion(v *Version) {
 }
 
 func printVersion(cmd *cobra.Command, args []string) {
-  fmt.Printf("github-pr-comment %s\n", version.Version)
+  fmt.Printf("github-pr-approval %s\n", version.Version)
 }

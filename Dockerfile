@@ -32,13 +32,8 @@ ARG GOLANG_VERSION=1.15
 
 FROM golang:${GOLANG_VERSION} AS devenv
 
-ARG ORG=nderjung
-ARG REPO=concourse-github-pr-comment-resource
-
-RUN set -xe; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-        sudo;
+ARG ORG=unikraft
+ARG REPO=concourse-github-pr-approval-resource
 
 COPY . /go/src/github.com/${ORG}/${REPO}
 
@@ -46,19 +41,19 @@ FROM devenv AS build
 
 ARG GOOS=linux
 ARG GOARCH=amd64
-ARG ORG=nderjung
-ARG REPO=concourse-github-pr-comment-resource
+ARG ORG=unikraft
+ARG REPO=concourse-github-pr-approval-resource
 
 WORKDIR /go/src/github.com/${ORG}/${REPO}
 
 RUN set -xe; \
-    BUILDPATH=/github-pr-comment make build
+    BUILDPATH=/github-pr-approval make build
 
 FROM concourse/buildroot:git AS run
 
-ARG BIN=github-pr-resource
+ARG BIN=github-pr-approval
 
-COPY --from=build /github-pr-comment /bin/github-pr-comment
+COPY --from=build /github-pr-approval /bin/github-pr-approval
 
 # Required by concrouse resource
 COPY /assets/check /opt/resource/check

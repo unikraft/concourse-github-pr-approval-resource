@@ -37,7 +37,7 @@ import (
   "encoding/json"
 
   "github.com/spf13/cobra"
-  "github.com/nderjung/concourse-github-pr-comment-resource/api"
+  "github.com/unikraft/concourse-github-pr-approval-resource/api"
 )
 
 // CheckCmd ...

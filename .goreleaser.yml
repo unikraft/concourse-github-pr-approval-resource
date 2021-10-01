@@ -2,7 +2,7 @@ release:
   prerelease: false
 
 builds:
-  - binary: dist/github-pr-comment
+  - binary: dist/github-pr-approval
     env:
       - CGO_ENABLED=0
     goos:
@@ -16,10 +16,10 @@ dockers:
     use: docker
     # todo: on 1.0 remove 'v' prefix
     image_templates:
-      - "ndrjng/concourse-github-pr-comment-resource:latest"
-      - "ndrjng/concourse-github-pr-comment-resource:{{ .Tag }}"
-      - "ndrjng/concourse-github-pr-comment-resource:v{{ .Major }}"
-      - "ndrjng/concourse-github-pr-comment-resource:v{{ .Major }}.{{ .Minor }}"
+      - "unikraft/concourse-github-pr-approval-resource:latest"
+      - "unikraft/concourse-github-pr-approval-resource:{{ .Tag }}"
+      - "unikraft/concourse-github-pr-approval-resource:v{{ .Major }}"
+      - "unikraft/concourse-github-pr-approval-resource:v{{ .Major }}.{{ .Minor }}"
     extra_files:
       - go.mod
       - go.sum

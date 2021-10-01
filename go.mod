@@ -1,4 +1,4 @@
-module github.com/nderjung/concourse-github-pr-comment-resource
+module github.com/unikraft/concourse-github-pr-approval-resource
 
 go 1.15
 

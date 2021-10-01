@@ -64,7 +64,7 @@ jobs:
       - name: Build snapshot artifacts
         run: make ci-build-snapshot-packages
 
-      - run: docker images ndrjng/concourse-github-pr-comment-resource
+      - run: docker images unikraft/concourse-github-pr-approval-resource
 
       - name: Test production image
         run: make ci-test-production-image

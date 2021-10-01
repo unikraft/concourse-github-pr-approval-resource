@@ -35,7 +35,7 @@ import (
   "fmt"
 
   "github.com/spf13/cobra"
-  "github.com/nderjung/concourse-github-pr-comment-resource/actions"
+  "github.com/unikraft/concourse-github-pr-approval-resource/actions"
 )
 
 

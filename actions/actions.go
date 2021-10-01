@@ -40,6 +40,8 @@ import (
   "encoding/json"
 
   "github.com/google/go-github/v32/github"
+
+  "github.com/unikraft/concourse-github-pr-approval-resource/api"
 )
 
 // Source parameters provided by the resource.
@@ -61,23 +63,33 @@ type Source struct {
   OnlyMergeable          bool   `json:"only_mergeable"`
   States               []string `json:"states"`
   Labels               []string `json:"labels"`
-  Comments             []string `json:"comments"`
-  CommenterAssociation []string `json:"commenter_association"`
-  MapCommentMeta         bool   `json:"map_comment_meta"`
+  
+  MinApprovals           int    `json:"min_approvals"`
+  ApproverComments     []string `json:"approver_comments"`
+  ApproverTeams        []string `json:"approver_teams"`
+  MinReviews             int    `json:"min_reviews"`
+  ReviewerComments     []string `json:"reviewer_comments"`
+  ReviewerTeams        []string `json:"reviewer_teams"`
   ReviewStates         []string `json:"review_states"`
-  When                   string `json:"when"` // all, latest, first
 
   IgnoreStates         []string `json:"ignore_states"`
   IgnoreLabels         []string `json:"ignore_labels"`
-  IgnoreComments       []string `json:"ignore_comments"`
+}
+
+type Response struct {
+  ReviewID  string `json:"review_id"`
+  CommentID string `json:"comment_id"`
+  CreatedAt string `json:"created_at"`
 }
 
 // Version communicated with Concourse.
 type Version struct {
-  CreatedAt string `json:"created_at"`
-  PrID      string `json:"pr_id"`
-  ReviewID  string `json:"review_id"`
-  CommentID string `json:"comment_id"`
+  PrID         string   `json:"pr_id"`
+  ApprovedBy   string    `json:"approved_by"`
+  approvedBy []*Response
+  ReviewedBy   string    `json:"reviewed_by"`
+  reviewedBy []*Response
+  lastUpdated  int64
 }
 
 // Metadata has a key name and value
@@ -108,7 +120,7 @@ func (m *Metadata) Get(name string) (string, error) {
   return "", fmt.Errorf("metadata index does not exist: %s", name)
 }
 
-func serializeMetadata(meta interface{}) Metadata {
+func serializeStruct(meta interface{}) Metadata {
   var res Metadata
   v := reflect.ValueOf(meta)
   typeOfS := v.Type()
@@ -194,33 +206,14 @@ func (source *Source) requestsLabels(labels []*github.Label) bool {
   return ret
 }
 
-// requestsCommenterAssociation checks the comment author's association
-func (source *Source) requestsCommenterAssociation(assoc string) bool {
-  // if no associations set, assume all
-  if len(source.CommenterAssociation) == 0 || (
-      len(source.CommenterAssociation) == 1 &&
-      source.CommenterAssociation[0] == "all") {
-    return true
-  }
-
-  assoc = strings.ToLower(assoc)
-  for _, a := range source.CommenterAssociation {
-    if assoc == strings.ToLower(a) {
-      return true
-    }
-  }
-
-  return false
-}
-
-// requestsCommentRegex determines if the source requests this comment regex
-func (source *Source) requestsCommentRegex(comment string) bool {
+// requestsReviewerRegex determines if the source requests this reviewer regex
+func (source *Source) requestsReviewerRegex(comment string) bool {
   ret := false
 
-  if len(source.Comments) == 0 {
+  if len(source.ReviewerComments) == 0 {
     ret = true
   } else {
-    for _, c := range source.Comments {
+    for _, c := range source.ReviewerComments {
       matched, _ := regexp.Match(c, []byte(comment))
       if matched {
         ret = true
@@ -228,14 +221,79 @@ func (source *Source) requestsCommentRegex(comment string) bool {
     }
   }
 
-  for _, c := range source.IgnoreComments {
-    matched, _ := regexp.Match(c, []byte(comment))
-    if matched {
-      ret = false
+  return ret
+}
+
+// requestsReviewerTeam determines if the source requests this reviewer team
+func (source *Source) requestsReviewerTeam(c *api.GithubClient, username string) bool {
+  // No team set, we can assume this is "catch all"
+  if len(source.ReviewerTeams) == 0 {
+    return true
+  }
+
+  for _, t := range source.ReviewerTeams {
+    if ok, _ := c.UserMemberOfTeam(username, t); ok {
+      return true
+    }
+  }
+
+  return false
+}
+
+// hasMinReviewers determines whether the supplied list meets the requested
+// minimum
+func (source *Source) hasMinReviewers(numReviewers int) bool {
+  min := 1
+  if source.MinReviews > min {
+    min = source.MinReviews
+  }
+
+  return numReviewers >= min
+}
+
+// requestsApproverRegex determines if the source requests this approver regex
+func (source *Source) requestsApproverRegex(comment string) bool {
+  ret := false
+
+  if len(source.ApproverComments) == 0 {
+    ret = true
+  } else {
+    for _, c := range source.ApproverComments {
+      matched, _ := regexp.Match(c, []byte(comment))
+      if matched {
+        ret = true
+      }
     }
   }
 
   return ret
+}
+
+// requestsApproverTeam determines if the source requests this approver team
+func (source *Source) requestsApproverTeam(c *api.GithubClient, username string) bool {
+  // No team set, we can assume this is "catch all"
+  if len(source.ApproverTeams) == 0 {
+    return true
+  }
+
+  for _, t := range source.ApproverTeams {
+    if ok, _ := c.UserMemberOfTeam(username, t); ok {
+      return true
+    }
+  }
+
+  return false
+}
+
+// hasMinApprovers determines whether the supplied list meets the requested
+// minimum
+func (source *Source) hasMinApprovers(numApprovers int) bool {
+  min := 1
+  if source.MinApprovals > min {
+    min = source.MinApprovals
+  }
+
+  return numApprovers >= min
 }
 
 var logger = log.New(os.Stderr, "resource:", log.Lshortfile)

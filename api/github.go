@@ -55,7 +55,7 @@ type GithubClient struct {
 type Github interface {
   ListPullRequests() ([]*github.PullRequest, error)
   GetPullRequest(prID int) (*github.PullRequest, error)
-  ListPullRequestComments(prID int) ([]*github.PullRequestComment, error)
+  ListPullRequestComments(prID int) ([]*github.IssueComment, error)
   ListPullRequestReviews(prID int) ([]*github.PullRequestReview, error)
   GetPullRequestComment(commentID int64) (*github.IssueComment, error)
   GetPullRequestReview(prID int, reviewID int64) (*github.PullRequestReview, error)
@@ -65,7 +65,16 @@ type Github interface {
   RemovePullRequestLabels(prID int, labels []string) error
   ReplacePullRequestLabels(prID int, labels []string) error
   CreatePullRequestComment(prID int, comment string) error
+  FindTeam(orgTeam string) (*github.Team, error)
+  ListTeamMembers(orgTeam string) ([]string, error)
+  UserMemberOfTeam(username, team string) (bool, error)
 }
+
+// Some local cache which helps us keep track of users and the teams they're
+// associated with.
+var (
+  userTeamCache map[string][]string
+)
 
 // NewGitHubClient for creating a new instance of the client.
 func NewGithubClient(repo string, accessToken string, skipSSL bool, githubEndpoint string) (*GithubClient, error) {
@@ -110,6 +119,8 @@ func NewGithubClient(repo string, accessToken string, skipSSL bool, githubEndpoi
   } else {
     client = github.NewClient(oauth2Client)
   }
+
+  userTeamCache = make(map[string][]string)
 
   return &GithubClient{
     Owner:      owner,
@@ -158,37 +169,62 @@ func (c *GithubClient) GetPullRequest(prID int) (*github.PullRequest, error) {
 // ListPullRequestComments returns the list of comments for the specific pull
 // request given its ID relative to the configured repo
 func (c *GithubClient) ListPullRequestComments(prID int) ([]*github.IssueComment, error) {
-  comments, _, err := c.Client.Issues.ListComments(
-    context.TODO(),
-    c.Owner,
-    c.Repository,
-    prID,
-    &github.IssueListCommentsOptions{
-      ListOptions: github.ListOptions{
-        // TODO: We need to break up requests and be good API consumers
-        PerPage: 1000,
+  opts := github.ListOptions{}
+  var comments []*github.IssueComment
+
+  for {
+    more, resp, err := c.Client.Issues.ListComments(
+      context.TODO(),
+      c.Owner,
+      c.Repository,
+      prID,
+      &github.IssueListCommentsOptions{
+        ListOptions: opts,
       },
-    },
-  )
-  if err != nil {
-    return nil, err
+    )
+    if err != nil {
+      return nil, err
+    }
+
+    comments = append(comments, more...)
+
+    if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
   }
+
   return comments, nil
 }
 
 // ListPullRequestReviews returns the list of reviews for the specific pull
 // request given its ID relative to the configured repo
 func (c *GithubClient) ListPullRequestReviews(prID int) ([]*github.PullRequestReview, error) {
-  reviews, _, err := c.Client.PullRequests.ListReviews(
-    context.TODO(),
-    c.Owner,
-    c.Repository,
-    prID,
-    &github.ListOptions{},
-  )
-  if err != nil {
-    return nil, err
+  opts := &github.ListOptions{}
+  var reviews []*github.PullRequestReview
+
+  for {
+    more, resp, err := c.Client.PullRequests.ListReviews(
+      context.TODO(),
+      c.Owner,
+      c.Repository,
+      prID,
+      opts,
+    )
+    if err != nil {
+      return nil, err
+    }
+
+    reviews = append(reviews, more...)
+
+    if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
   }
+
   return reviews, nil
 }
 
@@ -348,11 +384,121 @@ func (c *GithubClient) CreatePullRequestComment(prID int, comment string) error 
   return err
 }
 
+func (c *GithubClient) FindTeam(orgTeam string) (*github.Team, error) {
+  org, team, err := parseTeam(orgTeam)
+  if err != nil {
+    return nil, fmt.Errorf("could not find team: %s", err)
+  }
+ 
+	opts := &github.ListOptions{}
+
+	for {
+		teams, resp, err := c.Client.Teams.ListTeams(context.TODO(), org, opts)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, t := range teams {
+			if t.GetName() == team {
+				return t, nil
+			}
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+
+  return nil, nil
+}
+
+func (c *GithubClient) ListTeamMembers(orgTeam string) ([]string, error) {
+  org, team, err := parseTeam(orgTeam)
+  if err != nil {
+    return nil, fmt.Errorf("could not find team: %s", err)
+  }
+
+  opts := github.ListOptions{}
+  var members []*github.User
+
+  for {
+    more, resp, err := c.Client.Teams.ListTeamMembersBySlug(
+      context.TODO(),
+      org,
+      team,
+      &github.TeamListTeamMembersOptions{
+        ListOptions: opts,
+      },
+    )
+    if err != nil {
+      return nil, err
+    }
+
+    members = append(members, more...)
+
+    if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+  }
+
+  var usernames []string
+  for _, member := range members {
+    usernames = append(usernames, *member.Login)
+  }
+
+  return usernames, nil
+}
+
+func (c *GithubClient) UserMemberOfTeam(username, team string) (bool, error) {
+  if teams, ok := userTeamCache[username]; ok {
+    for _, t := range teams {
+      if team == t {
+        return true, nil
+      }
+    }
+
+    return false, nil
+  }
+
+  members, err := c.ListTeamMembers(team)
+  if err != nil {
+    return false, nil
+  }
+
+  // Cache request
+  for _, member := range members {
+    userTeamCache[member] = append(userTeamCache[member], team)
+  }
+
+  if teams, ok := userTeamCache[username]; ok {
+    for _, t := range teams {
+      if team == t {
+        return true, nil
+      }
+    }
+  }
+
+  return false, nil
+}
+
 func parseRepository(s string) (string, string, error) {
   parts := strings.Split(s, "/")
   if len(parts) != 2 {
     return "", "", fmt.Errorf("malformed repository")
   }
+  return parts[0], parts[1], nil
+}
+
+func parseTeam(s string) (string, string, error) {
+  parts := strings.Split(s, "/")
+  if len(parts) != 2 {
+    return "", "", fmt.Errorf("invalid team format: expected @org/team")
+  }
+  parts[0] = strings.TrimPrefix(parts[0], "@")
   return parts[0], parts[1], nil
 }
 

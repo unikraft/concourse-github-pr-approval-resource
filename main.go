@@ -32,7 +32,7 @@ package main
  */
 
 import (
-  "github.com/nderjung/concourse-github-pr-comment-resource/cmd"
+  "github.com/unikraft/concourse-github-pr-approval-resource/cmd"
 )
 
 var (

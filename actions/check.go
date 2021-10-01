@@ -32,6 +32,7 @@ package actions
 
 import (
   "os"
+  "fmt"
   "sort"
   "strconv"
   "encoding/json"
@@ -95,10 +96,6 @@ func Check(req CheckRequest) (*CheckResponse, error) {
     return nil, err
   }
 
-  if len(req.Source.When) == 0 {
-    req.Source.When = "latest"
-  }
-
   var versions CheckResponse
   var version *Version
 
@@ -108,9 +105,25 @@ func Check(req CheckRequest) (*CheckResponse, error) {
     return nil, err
   }
 
+  // Pre-emptively populate list of team members so we can quickly look up
+  // user association as we iterate over reviews and comments of PRs.
+  // var userTeam map[string][]string
+  if len(pulls) > 0 {
+    if len(req.Source.ReviewerTeams) > 0 {
+      for _, team := range req.Source.ReviewerTeams {
+        _, err := client.ListTeamMembers(team)
+        if err != nil {
+          return nil, err
+        }
+      }
+    }
+  }
+
   // Iterate over all pull requests
   for _, pull := range pulls {
-    version = nil
+    version = &Version{
+      PrID: strconv.Itoa(*pull.Number),
+    }
 
     // Ignore if state not requested
     if !req.Source.requestsState(*pull.State) {
@@ -138,44 +151,32 @@ func Check(req CheckRequest) (*CheckResponse, error) {
       return nil, err
     }
 
-    latestCommentIsMatch := false
-
     for _, comment := range comments {
-      // Ignore comments which do not match comment author association
-      if !req.Source.requestsCommenterAssociation(*comment.AuthorAssociation) {
-        latestCommentIsMatch = false
-        continue
+      if req.Source.requestsApproverRegex(*comment.Body) {
+        if req.Source.requestsApproverTeam(client, *comment.User.Login) {
+          if comment.CreatedAt.Unix() > version.lastUpdated {
+            version.lastUpdated = comment.CreatedAt.Unix()
+          }
+
+          version.approvedBy = append(version.approvedBy, &Response{
+            CreatedAt: strconv.FormatInt(comment.CreatedAt.Unix(), 10),
+            CommentID: strconv.FormatInt(*comment.ID, 10),
+          })
+        }
       }
 
-      // Ignore comments which do not match regex
-      if !req.Source.requestsCommentRegex(*comment.Body) {
-        latestCommentIsMatch = false
-        continue
+      if req.Source.requestsReviewerRegex(*comment.Body) {
+        if req.Source.requestsReviewerTeam(client, *comment.User.Login) {
+          if comment.CreatedAt.Unix() > version.lastUpdated {
+            version.lastUpdated = comment.CreatedAt.Unix()
+          }
+
+          version.reviewedBy = append(version.reviewedBy, &Response{
+            CreatedAt: strconv.FormatInt(comment.CreatedAt.Unix(), 10),
+            CommentID: strconv.FormatInt(*comment.ID, 10),
+          })
+        }
       }
-
-      latestCommentIsMatch = true
-
-      // Add the comment ID to the list of versions we want Concourse to see
-      version = &Version{
-        CreatedAt: strconv.FormatInt(comment.CreatedAt.Unix(), 10),
-        PrID:      strconv.Itoa(*pull.Number),
-        CommentID: strconv.FormatInt(*comment.ID, 10),
-      }
-
-      if req.Source.When == "all" || req.Source.When == "first" {
-        versions = append(versions, *version)
-      }
-
-      // Break the loop now since we found the first match, causing the above
-      // statement to be valid for only "all"
-      if req.Source.When == "first" {
-        break
-      }
-    }
-
-    // Only save the latest
-    if req.Source.When == "latest" && latestCommentIsMatch {
-      versions = append(versions, *version)
     }
 
     // Iterate through all the reviews for this PR
@@ -184,48 +185,66 @@ func Check(req CheckRequest) (*CheckResponse, error) {
       return nil, err
     }
 
-    latestReviewIsMatch := false
-
     for _, review := range reviews {
-      // Ignore reviews which do not approve the
-      if !req.Source.requestsReviewState(*review.State) {
-        latestReviewIsMatch = false
-        continue
+      if req.Source.requestsApproverRegex(*review.Body) {
+        if req.Source.requestsApproverTeam(client, *review.User.Login) {
+          if !req.Source.requestsReviewState(*review.State) {
+            continue
+          }
+
+          if review.SubmittedAt.Unix() > version.lastUpdated {
+            version.lastUpdated = review.SubmittedAt.Unix()
+          }
+
+          version.approvedBy = append(version.approvedBy, &Response{
+            CreatedAt: strconv.FormatInt(review.SubmittedAt.Unix(), 10),
+            ReviewID: strconv.FormatInt(*review.ID, 10),
+          })
+        }
       }
 
-      if !req.Source.requestsCommentRegex(*review.Body) {
-        latestReviewIsMatch = false
-        continue
-      }
+      if req.Source.requestsReviewerRegex(*review.Body) {
+        if req.Source.requestsReviewerTeam(client, *review.User.Login) {
+          if !req.Source.requestsReviewState(*review.State) {
+            continue
+          }
 
-      latestReviewIsMatch = true
+          if review.SubmittedAt.Unix() > version.lastUpdated {
+            version.lastUpdated = review.SubmittedAt.Unix()
+          }
 
-      // Add the comment ID to the list of versions we want Concourse to see
-      version = &Version{
-        CreatedAt: strconv.FormatInt(review.SubmittedAt.Unix(), 10),
-        PrID:     strconv.Itoa(*pull.Number),
-        ReviewID: strconv.FormatInt(*review.ID, 10),
-      }
-
-      if req.Source.When == "all" || req.Source.When == "first" {
-        versions = append(versions, *version)
-      }
-
-      // Break the loop now since we found the first match, causing the above
-      // statement to be valid for only "all"
-      if req.Source.When == "first" {
-        break
+          version.reviewedBy = append(version.reviewedBy, &Response{
+            CreatedAt: strconv.FormatInt(review.SubmittedAt.Unix(), 10),
+            ReviewID: strconv.FormatInt(*review.ID, 10),
+          })
+        }
       }
     }
 
-    // Only save the latest
-    if req.Source.When == "latest" && latestReviewIsMatch {
+    // Only save the version if it matches the desired state:
+    if req.Source.hasMinApprovers(len(version.approvedBy)) && 
+       req.Source.hasMinReviewers(len(version.reviewedBy)) {
+      
+      // Convert responses to JSON string
+      var out []byte
+      out, err = json.Marshal(version.approvedBy)
+      if err != nil {
+        return nil, fmt.Errorf("could not marshal JSON: %s", err)
+      }
+      version.ApprovedBy = string(out)
+
+      out, err = json.Marshal(version.reviewedBy)
+      if err != nil {
+        return nil, fmt.Errorf("could not marshal JSON: %s", err)
+      }
+      version.ReviewedBy = string(out)
+      
       versions = append(versions, *version)
     }
   }
 
   sort.Slice(versions, func(i, j int) bool {
-    return versions[i].CreatedAt < versions[j].CreatedAt
+    return versions[i].lastUpdated < versions[j].lastUpdated
   })
 
   return &versions, nil

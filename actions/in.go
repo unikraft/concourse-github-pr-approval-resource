@@ -55,13 +55,13 @@ var InCmd = &cobra.Command{
 
 // InParams are the parameters for configuring the input
 type InParams struct {
-  CommentFile     string `json:"comment_file"`
   SourcePath      string `json:"source_path"`
   GitDepth        int    `json:"git_depth"`
   Submodules      bool   `json:"submodules"`
   SkipDownload    bool   `json:"skip_download"`
   FetchTags       bool   `json:"fetch_tags"`
   IntegrationTool string `json:"integration_tool"`
+  MapMetadata     bool   `json:"map_metadata"`
 }
 
 // InRequest from the check stdin.
@@ -77,24 +77,34 @@ type InResponse struct {
   Metadata Metadata `json:"metadata"`
 }
 
+type Message struct {
+  CommentID         int64             `json:"comment_id"`
+  ReviewID          int64             `json:"review_id"`
+  Body              string            `json:"body"`
+  CreatedAt         time.Time         `json:"created_at"`
+  UpdatedAt         time.Time         `json:"updated_at"`
+  AuthorAssociation string            `json:"author_association"`
+  HTMLURL           string            `json:"html_url"`
+  UserLogin         string            `json:"user_login"`
+  UserID            int64             `json:"user_id"`
+  UserAvatarURL     string            `json:"user_avatar_url"`
+  UserHTMLURL       string            `json:"user_html_url"`
+  Matches           map[string]string `json:"match"`
+}
+
 type InMetadata struct {
   PRID              int       `json:"pr_id"`
   PRHeadRef         string    `json:"pr_head_ref"`
   PRHeadSHA         string    `json:"pr_head_sha"`
   PRBaseRef         string    `json:"pr_base_ref"`
   PRBaseSHA         string    `json:"pr_base_sha"`
-  CommentID         int64     `json:"comment_id"`
-  Body              string    `json:"body"`
-  CreatedAt         time.Time `json:"created_at"`
-  UpdatedAt         time.Time `json:"updated_at"`
-  AuthorAssociation string    `json:"author_association"`
-  HTMLURL           string    `json:"html_url"`
-  UserLogin         string    `json:"user_login"`
-  UserID            int64     `json:"user_id"`
-  UserAvatarURL     string    `json:"user_avatar_url"`
-  UserHTMLURL       string    `json:"user_html_url"`
+  TotalApprovals    int       `json:"total_approvals"`
+  TotalReviews      int       `json:"total_reviews"`
 }
 
+var (
+  gh *api.GithubClient
+)
 
 func doInCmd(cmd *cobra.Command, args []string) {
   decoder := json.NewDecoder(os.Stdin)
@@ -124,7 +134,9 @@ func doInCmd(cmd *cobra.Command, args []string) {
 }
 
 func In(outputDir string, req InRequest) (*InResponse, error) {
-  client, err := api.NewGithubClient(
+  var err error
+
+  gh, err = api.NewGithubClient(
     req.Source.Repository,
     req.Source.AccessToken,
     req.Source.SkipSSLVerification,
@@ -134,120 +146,109 @@ func In(outputDir string, req InRequest) (*InResponse, error) {
     return nil, err
   }
 
-  prId, _ := strconv.ParseInt(req.Version.PrID, 10, 64)
-  reviewId, _ := strconv.ParseInt(req.Version.ReviewID, 10, 64)
-  commentId, _ := strconv.ParseInt(req.Version.CommentID, 10, 64)
+  prID, _ := strconv.ParseInt(req.Version.PrID, 10, 64)
 
-  pull, err := client.GetPullRequest(int(prId))
+  pull, err := gh.GetPullRequest(int(prID))
   if err != nil {
     return nil, err
   }
 
   metadata := InMetadata{
-    PRID:       int(prId),
-    PRHeadRef: *pull.Head.Ref,
-    PRHeadSHA: *pull.Head.SHA,
-    PRBaseRef: *pull.Base.Ref,
-    PRBaseSHA: *pull.Base.SHA,
+    PRID:           int(prID),
+    PRHeadRef:     *pull.Head.Ref,
+    PRHeadSHA:     *pull.Head.SHA,
+    PRBaseRef:     *pull.Base.Ref,
+    PRBaseSHA:     *pull.Base.SHA,
+    TotalApprovals: 0,
+    TotalReviews:   0,
   }
 
-  // Write comment, version and metadata for reuse in PUT
+  // Write approvals, reviews, version and metadata for reuse in PUT path
   path := filepath.Join(outputDir)
   if err := os.MkdirAll(path, os.ModePerm); err != nil {
     return nil, fmt.Errorf("failed to create output directory: %s", err)
   }
 
-  // Set the destination file to save the comment to
-  commentFile := "comment.txt"
-  if req.Params.CommentFile != "" {
-    commentFile = req.Params.CommentFile
+  var reviewID int64
+  var commentID int64
+  var approvedBy []Message
+  var reviewedBy []Message
+  var message *Message
+
+  // Decode the JSON value for approvers
+  if err := json.Unmarshal([]byte(req.Version.ApprovedBy),
+      &req.Version.approvedBy); err != nil {
+    return nil, fmt.Errorf("could not unmarshal JSON: %s", err)
   }
 
-  // Write the comment body to the specified path
-  f, err := os.Create(filepath.Join(path, commentFile))
-  if err != nil {
-    return nil, fmt.Errorf("could not create comment file: %s", err)
-  }
+  for i, approval := range req.Version.approvedBy {
+    reviewID, _ = strconv.ParseInt(approval.ReviewID, 10, 64)
+    commentID, _ = strconv.ParseInt(approval.CommentID, 10, 64)
 
-  defer f.Close()
-
-  err = f.Truncate(0)
-  if err != nil {
-    return nil, err
-  }
-
-  var serialized Metadata
-
-  if commentId > 0 {
-    comment, err := client.GetPullRequestComment(commentId)
-    if err != nil {
-      return nil, fmt.Errorf("could not retrieve comment: %s", err)
+    if reviewID > 0 {
+      message, err = parseReview(int(prID), reviewID, req.Source.ApproverComments)
+    } else if commentID > 0 {
+      message, err = parseComment(commentID, req.Source.ApproverComments)
+    } else {
+      err = fmt.Errorf("invalid approval: no comment or review id")
     }
 
-    metadata.CommentID = *comment.ID
-    metadata.Body = *comment.Body
-    metadata.CreatedAt = *comment.CreatedAt
-    metadata.UpdatedAt = *comment.UpdatedAt
-    metadata.AuthorAssociation = *comment.AuthorAssociation
-    metadata.HTMLURL = *comment.HTMLURL
-    metadata.UserLogin = *comment.User.Login
-    metadata.UserID = *comment.User.ID
-    metadata.UserAvatarURL = *comment.User.AvatarURL
-    metadata.UserHTMLURL = *comment.User.HTMLURL
-    
-    serialized = serializeMetadata(metadata)
+    if err != nil {
+      return nil, fmt.Errorf("could not parse: %s", err)
+    }
 
-    if req.Source.MapCommentMeta {
-      for _, commentStr := range req.Source.Comments {
-        extraMeta := getParams(commentStr, *comment.Body)
+    err = saveMessage(path, i, message)
+    if err != nil {
+      return nil, fmt.Errorf("could not save message: %s", err)
+    }
+
+    approvedBy = append(approvedBy, *message)
+    metadata.TotalApprovals++
+  }
+
+  // Decode the JSON value for reviewers
+  if err := json.Unmarshal([]byte(req.Version.ReviewedBy),
+      &req.Version.reviewedBy); err != nil {
+    return nil, fmt.Errorf("could not unmarshal JSON: %s", err)
+  }
+
+  for i, review := range req.Version.reviewedBy {
+    reviewID, _ = strconv.ParseInt(review.ReviewID, 10, 64)
+    commentID, _ = strconv.ParseInt(review.CommentID, 10, 64)
+
+    if reviewID > 0 {
+      message, err = parseReview(int(prID), reviewID, req.Source.ReviewerComments)
+    } else if commentID > 0 {
+      message, err = parseComment(commentID, req.Source.ReviewerComments)
+    } else {
+      err = fmt.Errorf("invalid review: no comment or review id")
+    }
+
+    if err != nil {
+      return nil, fmt.Errorf("could not parse: %s", err)
+    }
+
+    err = saveMessage(path, i, message)
+    if err != nil {
+      return nil, fmt.Errorf("could not save message: %s", err)
+    }
+
+    reviewedBy = append(reviewedBy, *message)
+    metadata.TotalReviews++
+  }
+
+  serializedMetadata := serializeStruct(metadata)
   
-        for k, v := range extraMeta {
-          serialized.Add(k, v)
-        }
-      }
+  for i, approval := range approvedBy {
+    for k, v := range approval.Matches {
+      serializedMetadata.Add(fmt.Sprintf("%s_%d", k, i + 1), v)
     }
-
-    _, err = f.WriteString(*comment.Body)
-    if err != nil {
-      return nil, err
-    }
-  } else if reviewId > 0 && prId > 0 {
-    review, err := client.GetPullRequestReview(
-      int(prId),
-      reviewId,
-    )
-    if err != nil {
-      return nil, fmt.Errorf("could not retrieve review: %s", err)
-    }
-    
-    metadata.CommentID = *review.ID
-    metadata.Body = *review.Body
-    metadata.CreatedAt = *review.SubmittedAt
-    metadata.AuthorAssociation = *review.AuthorAssociation
-    metadata.HTMLURL = *review.HTMLURL
-    metadata.UserLogin = *review.User.Login
-    metadata.UserID = *review.User.ID
-    metadata.UserAvatarURL = *review.User.AvatarURL
-    metadata.UserHTMLURL = *review.User.HTMLURL
-    
-    serialized = serializeMetadata(metadata)
-
-    if req.Source.MapCommentMeta {
-      for _, commentStr := range req.Source.Comments {
-        extraMeta := getParams(commentStr, *review.Body)
+  }
   
-        for k, v := range extraMeta {
-          serialized.Add(k, v)
-        }
-      }
+  for i, review := range reviewedBy {
+    for k, v := range review.Matches {
+      serializedMetadata.Add(fmt.Sprintf("%s_%d", k, i + 1), v)
     }
-
-    _, err = f.WriteString(*review.Body)
-    if err != nil {
-      return nil, err
-    }
-  } else {
-    return nil, fmt.Errorf("cannot extrapolate version")
   }
 
   b, err := json.Marshal(req.Version)
@@ -259,7 +260,7 @@ func In(outputDir string, req InRequest) (*InResponse, error) {
     return nil, fmt.Errorf("failed to write version: %s", err)
   }
 
-  b, err = json.Marshal(serialized)
+  b, err = json.Marshal(serializedMetadata)
   if err != nil {
     return nil, fmt.Errorf("failed to marshal metadata: %s", err)
   }
@@ -269,11 +270,23 @@ func In(outputDir string, req InRequest) (*InResponse, error) {
   }
 
   // Save the individual metadata items to seperate files
-  for _, d := range serialized {
+  for _, d := range serializedMetadata {
     filename := d.Name
     content := []byte(d.Value)
     if err := ioutil.WriteFile(filepath.Join(path, filename), content, 0644); err != nil {
       return nil, fmt.Errorf("failed to write metadata file %s: %s", filename, err)
+    }
+  }
+
+  if req.Params.MapMetadata {
+    err = writeMap(approvedBy, filepath.Join(path, "approval"))
+    if err != nil {
+      return nil, fmt.Errorf("cannot write map: %s", err)
+    }
+
+    err = writeMap(reviewedBy, filepath.Join(path, "review"))
+    if err != nil {
+      return nil, fmt.Errorf("cannot write map: %s", err)
     }
   }
 
@@ -356,13 +369,13 @@ func In(outputDir string, req InRequest) (*InResponse, error) {
 
   return &InResponse{
     Version:  req.Version,
-    Metadata: serialized,
+    Metadata: serializedMetadata,
   }, nil
 }
 
-func getParams(regEx, comment string) (paramsMap map[string]string) {
+func getParams(regEx, body string) (paramsMap map[string]string) {
   var compRegEx = regexp.MustCompile(regEx)
-  match := compRegEx.FindStringSubmatch(comment)
+  match := compRegEx.FindStringSubmatch(body)
 
   paramsMap = make(map[string]string)
   for i, name := range compRegEx.SubexpNames() {
@@ -371,5 +384,135 @@ func getParams(regEx, comment string) (paramsMap map[string]string) {
     }
   }
 
-  return
+  return paramsMap
+}
+
+func parseReview(prID int, reviewID int64, regex []string) (*Message, error) {
+  review, err := gh.GetPullRequestReview(
+    prID,
+    reviewID,
+  )
+  if err != nil {
+    return nil, fmt.Errorf("could not retrieve review: %s", err)
+  }
+
+  message := &Message{
+    ReviewID:         *review.ID,
+    Body:              *review.Body,
+    CreatedAt:         *review.SubmittedAt,
+    AuthorAssociation: *review.AuthorAssociation,
+    HTMLURL:           *review.HTMLURL,
+    UserLogin:         *review.User.Login,
+    UserID:            *review.User.ID,
+    UserAvatarURL:     *review.User.AvatarURL,
+    UserHTMLURL:       *review.User.HTMLURL,
+  }
+  
+  message.Matches = make(map[string]string)
+  for _, r := range regex {
+    for k, v := range getParams(r, *review.Body) {
+      message.Matches[k] = v
+    }
+  }
+
+  return message, nil
+}
+
+func parseComment(commentID int64, regex []string) (*Message, error) {
+  comment, err := gh.GetPullRequestComment(
+    commentID,
+  )
+  if err != nil {
+    return nil, fmt.Errorf("could not retrieve review: %s", err)
+  }
+
+  message := &Message{
+    CommentID:         *comment.ID,
+    Body:              *comment.Body,
+    CreatedAt:         *comment.CreatedAt,
+    UpdatedAt:         *comment.UpdatedAt,
+    AuthorAssociation: *comment.AuthorAssociation,
+    HTMLURL:           *comment.HTMLURL,
+    UserLogin:         *comment.User.Login,
+    UserID:            *comment.User.ID,
+    UserAvatarURL:     *comment.User.AvatarURL,
+    UserHTMLURL:       *comment.User.HTMLURL,
+  }
+  
+  message.Matches = make(map[string]string)
+  for _, r := range regex {
+    for k, v := range getParams(r, *comment.Body) {
+      message.Matches[k] = v
+    }
+  }
+  return message, nil
+}
+
+// saveMessage ...
+func saveMessage(path string, id int, message *Message) error {
+  return nil
+}
+
+// writeMap writes the metadata of a review or comment to the parent path
+func writeMap(messages []Message, parent string) error {
+  var err error
+  var dir string
+  var path string
+  var serialized Metadata
+
+  for i, message := range messages {
+    dir = filepath.Join(parent, fmt.Sprintf("%d", i + 1))
+    if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+      return fmt.Errorf("failed to create source directory: %s", err)
+    }
+
+    serialized = serializeStruct(message)
+    
+    for _, field := range serialized {
+      if field.Name == "match" {
+        continue
+      }
+
+      path = filepath.Join(dir, field.Name)
+
+      err = writeTextToFile(path, field.Value)
+      if err != nil {
+        return fmt.Errorf("could not write: %s: %s", path, err)
+      }
+    }
+
+    for k, v := range message.Matches {
+      path = filepath.Join(dir, k)
+
+      err = writeTextToFile(path, v)
+      if err != nil {
+        return fmt.Errorf("could not write: %s: %s", path, err)
+      }
+    }
+  }
+
+  return nil
+}
+
+// writeTextToFile ...
+func writeTextToFile(file, text string) error {
+  // Write the comment body to the specified path
+  f, err := os.Create(file)
+  if err != nil {
+    return fmt.Errorf("could not create comment file: %s", err)
+  }
+
+  defer f.Close()
+
+  err = f.Truncate(0)
+  if err != nil {
+    return err
+  }
+
+  _, err = f.WriteString(text)
+  if err != nil {
+    return err
+  }
+
+  return nil
 }

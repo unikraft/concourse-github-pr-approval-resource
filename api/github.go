@@ -131,21 +131,33 @@ func NewGithubClient(repo string, accessToken string, skipSSL bool, githubEndpoi
 
 // ListPullRequests returns the list of pull requests for the configured repo
 func (c *GithubClient) ListPullRequests() ([]*github.PullRequest, error) {
-  pulls, _, err := c.Client.PullRequests.List(
-    context.TODO(), 
-    c.Owner,
-    c.Repository,
-    &github.PullRequestListOptions{
-      // We want all states so we can sort through them later
-      State: "all",
-      ListOptions: github.ListOptions{
-        // TODO: We need to break up requests and be good API consumers
-        PerPage: 1000,
+  var pulls []*github.PullRequest
+	opts := github.ListOptions{}
+
+  for {
+    more, resp, err := c.Client.PullRequests.List(
+      context.TODO(),
+      c.Owner,
+      c.Repository,
+      &github.PullRequestListOptions{
+        // We want all states so we can sort through them later
+        State: "all",
+        ListOptions: opts,
       },
-    },
-  )
-  if err != nil {
-    return nil, err
+    )
+    if err != nil {
+      return nil, err
+    }
+
+    for _, pull := range more {
+      pulls = append(pulls, pull)
+    }
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
   }
 
   return pulls, nil

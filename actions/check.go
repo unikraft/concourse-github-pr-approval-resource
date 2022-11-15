@@ -121,6 +121,10 @@ func Check(req CheckRequest) (*CheckResponse, error) {
 
   // Iterate over all pull requests
   for _, pull := range pulls {
+    if req.Source.Number > 0 && *pull.Number != req.Source.Number {
+      continue
+    }
+
     version = &Version{
       PrID: strconv.Itoa(*pull.Number),
     }

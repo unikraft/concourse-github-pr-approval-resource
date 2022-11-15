@@ -52,6 +52,7 @@ type Source struct {
 
   // The repository to interface with
   Repository             string `json:"repository"`
+  Number                 string `json:"number"`
   DisableGitLfs          bool   `json:"disable_git_lfs"`
 
   // Access methods

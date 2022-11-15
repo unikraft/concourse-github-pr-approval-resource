@@ -153,7 +153,11 @@ func Check(req CheckRequest) (*CheckResponse, error) {
 
     for _, comment := range comments {
       if req.Source.requestsApproverRegex(*comment.Body) {
-        if req.Source.requestsApproverTeam(client, *comment.User.Login) {
+        if req.Source.requestsApproverTeam(client, *pull, *comment.User.Login) {
+          if !req.Source.requestsApproveState("comment") {
+            continue
+          }
+
           if comment.CreatedAt.Unix() > version.lastUpdated {
             version.lastUpdated = comment.CreatedAt.Unix()
           }
@@ -166,7 +170,7 @@ func Check(req CheckRequest) (*CheckResponse, error) {
       }
 
       if req.Source.requestsReviewerRegex(*comment.Body) {
-        if req.Source.requestsReviewerTeam(client, *comment.User.Login) {
+        if req.Source.requestsReviewerTeam(client, *pull, *comment.User.Login) {
           if comment.CreatedAt.Unix() > version.lastUpdated {
             version.lastUpdated = comment.CreatedAt.Unix()
           }
@@ -187,8 +191,8 @@ func Check(req CheckRequest) (*CheckResponse, error) {
 
     for _, review := range reviews {
       if req.Source.requestsApproverRegex(*review.Body) {
-        if req.Source.requestsApproverTeam(client, *review.User.Login) {
-          if !req.Source.requestsReviewState(*review.State) {
+        if req.Source.requestsApproverTeam(client, *pull, *review.User.Login) {
+          if !req.Source.requestsApproveState(*review.State) {
             continue
           }
 
@@ -204,7 +208,7 @@ func Check(req CheckRequest) (*CheckResponse, error) {
       }
 
       if req.Source.requestsReviewerRegex(*review.Body) {
-        if req.Source.requestsReviewerTeam(client, *review.User.Login) {
+        if req.Source.requestsReviewerTeam(client, *pull, *review.User.Login) {
           if !req.Source.requestsReviewState(*review.State) {
             continue
           }

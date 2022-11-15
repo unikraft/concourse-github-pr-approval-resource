@@ -67,10 +67,13 @@ type Source struct {
   MinApprovals           int    `json:"min_approvals"`
   ApproverComments     []string `json:"approver_comments"`
   ApproverTeams        []string `json:"approver_teams"`
+  ApproveStates        []string `json:"approve_states"`
   MinReviews             int    `json:"min_reviews"`
   ReviewerComments     []string `json:"reviewer_comments"`
   ReviewerTeams        []string `json:"reviewer_teams"`
   ReviewStates         []string `json:"review_states"`
+  RespectAssignees       bool   `json:"respect_assignees"`
+  RespectReviewers       bool   `json:"respect_reviewers"`
 
   IgnoreStates         []string `json:"ignore_states"`
   IgnoreLabels         []string `json:"ignore_labels"`
@@ -162,8 +165,28 @@ func (source *Source) requestsState(state string) bool {
   return ret
 }
 
+// requestsApproveState checks whether the PR approver matches the desired state
+func (source *Source) requestsApproveState(state string) bool {
+  if len(source.ApproveStates) == 0 {
+    return true
+  }
+
+  state = strings.ToLower(state)
+  for _, s := range source.ApproveStates {
+    if state == strings.ToLower(s) {
+      return true
+    }
+  }
+
+  return false
+}
+
 // requestsReviewState checks whether the PR review matches the desired state
 func (source *Source) requestsReviewState(state string) bool {
+  if len(source.ReviewStates) == 0 {
+    return true
+  }
+
   state = strings.ToLower(state)
   for _, s := range source.ReviewStates {
     if state == strings.ToLower(s) {
@@ -225,12 +248,12 @@ func (source *Source) requestsReviewerRegex(comment string) bool {
 }
 
 // requestsReviewerTeam determines if the source requests this reviewer team
-func (source *Source) requestsReviewerTeam(c *api.GithubClient, username string) bool {
-  // No team set, we can assume this is "catch all"
-  if len(source.ReviewerTeams) == 0 {
+func (source *Source) requestsReviewerTeam(c *api.GithubClient, pr github.PullRequest, username string) bool {
+  if source.RespectReviewers {
     return true
   }
 
+  // Check the named approver teams part of the input to this resource
   for _, t := range source.ReviewerTeams {
     if ok, _ := c.UserMemberOfTeam(username, t); ok {
       return true
@@ -270,12 +293,16 @@ func (source *Source) requestsApproverRegex(comment string) bool {
 }
 
 // requestsApproverTeam determines if the source requests this approver team
-func (source *Source) requestsApproverTeam(c *api.GithubClient, username string) bool {
-  // No team set, we can assume this is "catch all"
-  if len(source.ApproverTeams) == 0 {
-    return true
+func (source *Source) requestsApproverTeam(c *api.GithubClient, pr github.PullRequest, username string) bool {
+  if source.RespectAssignees {
+    for _, assignee := range pr.Assignees {
+      if username == *assignee.Login {
+        return true
+      }
+    }
   }
 
+  // Check the named approver teams part of the input to this resource
   for _, t := range source.ApproverTeams {
     if ok, _ := c.UserMemberOfTeam(username, t); ok {
       return true
